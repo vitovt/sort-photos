@@ -10,26 +10,31 @@ import sys
 
 
 def _normalize_sort_mode(value):
-    cleaned = value.lower().replace("-", "").replace("_", "").replace(" ", "")
+    cleaned = re.sub(r"[^a-z0-9]", "", value.lower())
     return cleaned
 
 
 NATURAL_CHUNK_RE = re.compile(r"(\d+)")
 
 SORT_MODE_VARIANTS = [
-    ("filenamealphabetical", "filename - alphabetical", {"type": "alpha", "reverse": False}),
-    ("filenamereversealphabetical", "filename - reversealphabetical", {"type": "alpha", "reverse": True}),
-    ("filenamenaturalsortorder", "filename - natural sort order", {"type": "natural", "reverse": False}),
-    ("filenamenaturalreversesortorder", "filename - natural reverse sort order", {"type": "natural", "reverse": True}),
-    ("creationdatetime", "creation datetime", {"type": "stat", "attribute": "st_ctime", "reverse": False}),
-    ("creationdatetimereverse", "creation datetime reverse", {"type": "stat", "attribute": "st_ctime", "reverse": True}),
-    ("changeddatetime", "changed datetime", {"type": "stat", "attribute": "st_mtime", "reverse": False}),
-    ("changeddatetimereverse", "changed datetime reverse", {"type": "stat", "attribute": "st_mtime", "reverse": True}),
-    ("sizeacc", "size acc", {"type": "stat", "attribute": "st_size", "reverse": False}),
-    ("sizedec", "size dec", {"type": "stat", "attribute": "st_size", "reverse": True}),
+    ("filenamealphabetical", "Filename alphabetical (A-Z)", {"type": "alpha", "reverse": False}),
+    ("filenamereversealphabetical", "Filename alphabetical (Z-A)", {"type": "alpha", "reverse": True}),
+    ("filenamenaturalsortorder", "Filename natural (A-Z)", {"type": "natural", "reverse": False}),
+    ("filenamenaturalreversesortorder", "Filename natural (Z-A)", {"type": "natural", "reverse": True}),
+    ("creationdatetime", "Created datetime (oldest first)", {"type": "stat", "attribute": "st_ctime", "reverse": False}),
+    ("creationdatetimereverse", "Created datetime (newest first)", {"type": "stat", "attribute": "st_ctime", "reverse": True}),
+    ("changeddatetime", "Modified datetime (oldest first)", {"type": "stat", "attribute": "st_mtime", "reverse": False}),
+    ("changeddatetimereverse", "Modified datetime (newest first)", {"type": "stat", "attribute": "st_mtime", "reverse": True}),
+    ("sizeacc", "File size (smallest first)", {"type": "stat", "attribute": "st_size", "reverse": False}),
+    ("sizedec", "File size (largest first)", {"type": "stat", "attribute": "st_size", "reverse": True}),
 ]
 
-SORT_MODE_INFO = {key: {"label": label, **config} for key, label, config in SORT_MODE_VARIANTS}
+SORT_MODE_INFO = {}
+SORT_MODE_LOOKUP = {}
+for key, label, config in SORT_MODE_VARIANTS:
+    SORT_MODE_INFO[key] = {"label": label, **config}
+    SORT_MODE_LOOKUP[_normalize_sort_mode(key)] = key
+    SORT_MODE_LOOKUP[_normalize_sort_mode(label)] = key
 
 class PhotoSorterApp:
     """
@@ -351,7 +356,7 @@ if __name__ == "__main__":
         print("Приклад: python sort-photos.py --mode move /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
         print("Приклад (багато тек): python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша /home/user/Фото_Родина")
         print("Приклад (Windows): python sort-photos.py --mode copy C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
-        print("Доступні режими сортування (--sortmode, за замовчуванням 'filename - alphabetical'):")
+        print("Доступні режими сортування (--sortmode, за замовчуванням 'Filename alphabetical (A-Z)'):")
         for _, label, _ in SORT_MODE_VARIANTS:
             print(f"  - {label}")
 
@@ -393,16 +398,16 @@ if __name__ == "__main__":
             else:
                 _, _, sort_value = arg.partition("=")
                 if not sort_value:
-                    print("Помилка: використовуйте '--sortmode \"filename - alphabetical\"' або '--sortmode=filename - alphabetical'.")
+                    print("Помилка: використовуйте '--sortmode \"Filename alphabetical (A-Z)\"' або '--sortmode=Filename alphabetical (A-Z)'.")
                     print_usage()
                     sys.exit(1)
                 i += 1
             normalized = _normalize_sort_mode(sort_value)
-            if normalized not in SORT_MODE_INFO:
+            if normalized not in SORT_MODE_LOOKUP:
                 print(f"Помилка: невідомий режим сортування '{sort_value}'.")
                 print_usage()
                 sys.exit(1)
-            sort_mode_key = normalized
+            sort_mode_key = SORT_MODE_LOOKUP[normalized]
         elif arg in ("-h", "--help"):
             print_usage()
             sys.exit(0)
