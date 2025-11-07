@@ -2,18 +2,43 @@
 
 import os
 import shutil
+import re
 from tkinter import Tk, Label, PhotoImage
 from PIL import Image, ImageTk
 from collections import deque
 import sys
+
+
+def _normalize_sort_mode(value):
+    cleaned = value.lower().replace("-", "").replace("_", "").replace(" ", "")
+    return cleaned
+
+
+NATURAL_CHUNK_RE = re.compile(r"(\d+)")
+
+SORT_MODE_VARIANTS = [
+    ("filenamealphabetical", "filename - alphabetical", {"type": "alpha", "reverse": False}),
+    ("filenamereversealphabetical", "filename - reversealphabetical", {"type": "alpha", "reverse": True}),
+    ("filenamenaturalsortorder", "filename - natural sort order", {"type": "natural", "reverse": False}),
+    ("filenamenaturalreversesortorder", "filename - natural reverse sort order", {"type": "natural", "reverse": True}),
+    ("creationdatetime", "creation datetime", {"type": "stat", "attribute": "st_ctime", "reverse": False}),
+    ("creationdatetimereverse", "creation datetime reverse", {"type": "stat", "attribute": "st_ctime", "reverse": True}),
+    ("changeddatetime", "changed datetime", {"type": "stat", "attribute": "st_mtime", "reverse": False}),
+    ("changeddatetimereverse", "changed datetime reverse", {"type": "stat", "attribute": "st_mtime", "reverse": True}),
+    ("sizeacc", "size acc", {"type": "stat", "attribute": "st_size", "reverse": False}),
+    ("sizedec", "size dec", {"type": "stat", "attribute": "st_size", "reverse": True}),
+]
+
+SORT_MODE_INFO = {key: {"label": label, **config} for key, label, config in SORT_MODE_VARIANTS}
 
 class PhotoSorterApp:
     """
     Основний клас програми для сортування фотографій.
     Відображає фотографії та дозволяє користувачу переміщувати або копіювати їх
     до однієї з кількох цільових тек, зберігаючи ієрархію.
+    Також підтримує вибір режиму сортування списку фотографій.
     """
-    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move"):
+    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="filenamealphabetical"):
         self.master = master
         self.master.title("Сортувальник Фотографій")
         # Встановлюємо початковий розмір вікна.
@@ -27,6 +52,8 @@ class PhotoSorterApp:
         # Перетворюємо шляхи на абсолютні для уникнення проблем
         self.source_dir = os.path.abspath(source_dir)
         self.transfer_mode = transfer_mode
+        self.sort_mode = sort_mode
+        self.sort_mode_label = SORT_MODE_INFO[self.sort_mode]["label"]
 
         destination_dirs = [os.path.abspath(path) for path in destination_dirs]
         if len(destination_dirs) < 2:
@@ -49,6 +76,7 @@ class PhotoSorterApp:
 
         # Збираємо всі файли зображень з вихідної директорії та її підтек.
         self.photo_files = self._get_all_image_files()
+        # Список впорядковується згідно з параметром sort_mode.
         self.current_photo_index = -1 # Індекс поточного фото, починаємо з -1, щоб перший виклик load_next_photo зробив його 0.
 
         # Створюємо мітку для відображення зображення.
@@ -87,6 +115,7 @@ class PhotoSorterApp:
                 print("  Помилка доступу до директорії")
 
         print(f"Знайдено файлів зображень: {len(self.photo_files)}")
+        print(f"Режим сортування: {self.sort_mode_label}")
         if len(self.photo_files) > 0:
             print("Перші 5 знайдених файлів:")
             for i, file in enumerate(list(self.photo_files)[:5]):
@@ -96,6 +125,7 @@ class PhotoSorterApp:
         """
         Рекурсивно збирає всі файли зображень з вихідної директорії
         та її підтек. Підтримувані розширення файлів.
+        Після збирання застосовується обраний режим сортування.
         """
         image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
         all_files = deque() # Використовуємо deque для ефективного додавання/видалення
@@ -116,7 +146,8 @@ class PhotoSorterApp:
         except Exception as e:
             print(f"Помилка під час пошуку файлів: {e}")
 
-        return all_files
+        file_list = list(all_files)
+        return self._sort_photo_list(file_list)
 
     def _generate_hotkey(self, index):
         """
@@ -137,6 +168,43 @@ class PhotoSorterApp:
         cleaned = path.rstrip(os.sep)
         base = os.path.basename(cleaned)
         return base if base else cleaned
+
+    def _sort_photo_list(self, files):
+        """
+        Сортує список файлів згідно з обраним режимом.
+        """
+        config = SORT_MODE_INFO.get(self.sort_mode, SORT_MODE_INFO["filenamealphabetical"])
+        reverse = config.get("reverse", False)
+        sort_type = config.get("type")
+
+        if sort_type == "alpha":
+            key_func = lambda path: os.path.basename(path).lower()
+        elif sort_type == "natural":
+            key_func = lambda path: self._natural_key(os.path.basename(path))
+        elif sort_type == "stat":
+            attribute = config.get("attribute")
+            key_func = lambda path: self._get_stat_value(path, attribute)
+        else:
+            key_func = lambda path: os.path.basename(path).lower()
+
+        sorted_files = sorted(files, key=key_func, reverse=reverse)
+        return sorted_files
+
+    def _natural_key(self, text):
+        """
+        Формує натуральний ключ сортування для тексту.
+        """
+        return [int(chunk) if chunk.isdigit() else chunk.lower() for chunk in NATURAL_CHUNK_RE.split(text)]
+
+    def _get_stat_value(self, path, attribute):
+        """
+        Безпечно отримує значення st_* для шляху, повертаючи 0 при помилці.
+        """
+        try:
+            stat_result = os.stat(path)
+            return getattr(stat_result, attribute, 0)
+        except (FileNotFoundError, PermissionError, OSError):
+            return 0
 
     def on_resize(self, event):
         """
@@ -279,13 +347,17 @@ class PhotoSorterApp:
 
 if __name__ == "__main__":
     def print_usage():
-        print("Використання: python sort-photos.py [--mode move|copy] <вихідна_тека> <тека_1> <тека_2> [тека_3 ...]")
+        print("Використання: python sort-photos.py [--mode move|copy] [--sortmode <режим>] <вихідна_тека> <тека_1> <тека_2> [тека_3 ...]")
         print("Приклад: python sort-photos.py --mode move /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
         print("Приклад (багато тек): python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша /home/user/Фото_Родина")
         print("Приклад (Windows): python sort-photos.py --mode copy C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
+        print("Доступні режими сортування (--sortmode, за замовчуванням 'filename - alphabetical'):")
+        for _, label, _ in SORT_MODE_VARIANTS:
+            print(f"  - {label}")
 
     args = sys.argv[1:]
     mode = "move"
+    sort_mode_key = "filenamealphabetical"
     positional_args = []
     i = 0
     while i < len(args):
@@ -310,6 +382,27 @@ if __name__ == "__main__":
                 print("Помилка: режим має бути 'move' або 'copy'.")
                 print_usage()
                 sys.exit(1)
+        elif arg.startswith("--sortmode"):
+            if arg == "--sortmode":
+                if i + 1 >= len(args):
+                    print("Помилка: після --sortmode потрібно вказати один із документованих режимів.")
+                    print_usage()
+                    sys.exit(1)
+                sort_value = args[i + 1]
+                i += 2
+            else:
+                _, _, sort_value = arg.partition("=")
+                if not sort_value:
+                    print("Помилка: використовуйте '--sortmode \"filename - alphabetical\"' або '--sortmode=filename - alphabetical'.")
+                    print_usage()
+                    sys.exit(1)
+                i += 1
+            normalized = _normalize_sort_mode(sort_value)
+            if normalized not in SORT_MODE_INFO:
+                print(f"Помилка: невідомий режим сортування '{sort_value}'.")
+                print_usage()
+                sys.exit(1)
+            sort_mode_key = normalized
         elif arg in ("-h", "--help"):
             print_usage()
             sys.exit(0)
@@ -341,6 +434,6 @@ if __name__ == "__main__":
     # Ініціалізуємо головне вікно Tkinter.
     root = Tk()
     # Створюємо екземпляр програми.
-    app = PhotoSorterApp(root, source_directory, destination_directories, transfer_mode=mode)
+    app = PhotoSorterApp(root, source_directory, destination_directories, transfer_mode=mode, sort_mode=sort_mode_key)
     # Запускаємо головний цикл подій Tkinter.
     root.mainloop()
