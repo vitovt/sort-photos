@@ -10,10 +10,10 @@ import sys
 class PhotoSorterApp:
     """
     Основний клас програми для сортування фотографій.
-    Відображає фотографії та дозволяє користувачу переміщувати їх
-    до однієї з двох цільових тек, зберігаючи ієрархію.
+    Відображає фотографії та дозволяє користувачу переміщувати або копіювати їх
+    до однієї з кількох цільових тек, зберігаючи ієрархію.
     """
-    def __init__(self, master, source_dir, dest_dir_person1, dest_dir_person2):
+    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move"):
         self.master = master
         self.master.title("Сортувальник Фотографій")
         # Встановлюємо початковий розмір вікна.
@@ -26,13 +26,26 @@ class PhotoSorterApp:
 
         # Перетворюємо шляхи на абсолютні для уникнення проблем
         self.source_dir = os.path.abspath(source_dir)
-        self.dest_dir_person1 = os.path.abspath(dest_dir_person1)
-        self.dest_dir_person2 = os.path.abspath(dest_dir_person2)
+        self.transfer_mode = transfer_mode
 
-        # Створення цільових директорій, якщо вони не існують.
-        # exist_ok=True запобігає помилці, якщо тека вже є.
-        os.makedirs(self.dest_dir_person1, exist_ok=True)
-        os.makedirs(self.dest_dir_person2, exist_ok=True)
+        destination_dirs = [os.path.abspath(path) for path in destination_dirs]
+        if len(destination_dirs) < 2:
+            raise ValueError("Потрібно вказати щонайменше дві цільові теки призначення.")
+
+        self.destination_options = []
+        for index, dest in enumerate(destination_dirs):
+            key = self._generate_hotkey(index)
+            label = self._format_destination_label(dest)
+            self.destination_options.append((key, dest, label))
+            # Створення цільових директорій, якщо вони не існують.
+            # exist_ok=True запобігає помилці, якщо тека вже є.
+            os.makedirs(dest, exist_ok=True)
+
+        self.key_to_destination = {key: dest for key, dest, _ in self.destination_options}
+        self.destination_labels = {dest: label for _, dest, label in self.destination_options}
+        self.destination_instruction_text = ", ".join(
+            [f"'{key}' для {label}" for key, _, label in self.destination_options]
+        )
 
         # Збираємо всі файли зображень з вихідної директорії та її підтек.
         self.photo_files = self._get_all_image_files()
@@ -105,6 +118,26 @@ class PhotoSorterApp:
 
         return all_files
 
+    def _generate_hotkey(self, index):
+        """
+        Генерує гарячу клавішу для відповідної цільової теки.
+        Спочатку використовуються цифри, після дев'яти тек переходить до літер латиниці.
+        """
+        if index < 9:
+            return str(index + 1)
+        ascii_code = ord('A') + (index - 9)
+        if ascii_code > ord('Z'):
+            raise ValueError("Підтримується до 35 цільових тек.")
+        return chr(ascii_code)
+
+    def _format_destination_label(self, path):
+        """
+        Повертає назву теки без повного шляху для показу користувачу.
+        """
+        cleaned = path.rstrip(os.sep)
+        base = os.path.basename(cleaned)
+        return base if base else cleaned
+
     def on_resize(self, event):
         """
         Обробник події зміни розміру вікна.
@@ -126,8 +159,13 @@ class PhotoSorterApp:
         self.current_photo_index += 1
         if self.current_photo_index < len(self.photo_files):
             current_file_path = self.photo_files[self.current_photo_index]
-            self.status_label.config(text=f"Файл: {os.path.basename(current_file_path)} ({self.current_photo_index + 1}/{len(self.photo_files)})\n"
-                                          "Натисніть '1' для Людина1, '2' для Людина2, 'S' для пропуску, 'Q' для виходу.")
+            instructions = (f"Натисніть {self.destination_instruction_text}, "
+                            "'S' для пропуску, 'Q' для виходу.")
+            self.status_label.config(
+                text=(f"Файл: {os.path.basename(current_file_path)} "
+                      f"({self.current_photo_index + 1}/{len(self.photo_files)})\n"
+                      f"{instructions}")
+            )
             try:
                 # Відкриття зображення
                 img = Image.open(current_file_path)
@@ -190,10 +228,8 @@ class PhotoSorterApp:
 
         current_file_path = self.photo_files[self.current_photo_index]
 
-        if key == '1':
-            self._move_photo(current_file_path, self.dest_dir_person1)
-        elif key == '2':
-            self._move_photo(current_file_path, self.dest_dir_person2)
+        if key in self.key_to_destination:
+            self._move_photo(current_file_path, self.key_to_destination[key])
         elif key == 'S': # Пропустити фотографію
             self.status_label.config(text=f"Пропущено: {os.path.basename(current_file_path)}")
             self.master.update_idletasks() # Оновлюємо інтерфейс, щоб показати статус
@@ -201,7 +237,9 @@ class PhotoSorterApp:
             self.master.destroy()
             return
         else:
-            self.status_label.config(text="Невідома клавіша. Використовуйте '1', '2', 'S' або 'Q'.")
+            self.status_label.config(
+                text=f"Невідома клавіша. Використовуйте {self.destination_instruction_text}, 'S' або 'Q'."
+            )
             return # Не завантажуємо наступне фото, якщо була неправильна клавіша
 
         # Завантажуємо наступне фото після успішної обробки (переміщення або пропуску).
@@ -209,7 +247,7 @@ class PhotoSorterApp:
 
     def _move_photo(self, source_path, destination_base_dir):
         """
-        Переміщує фотографію з 'source_path' до 'destination_base_dir',
+        Переміщує або копіює фотографію з 'source_path' до 'destination_base_dir',
         зберігаючи при цьому відносну ієрархію тек.
         Наприклад, якщо source_dir=/src, source_path=/src/a/b/c.jpg,
         destination_base_dir=/dest, то фото буде переміщено до /dest/a/b/c.jpg.
@@ -224,27 +262,72 @@ class PhotoSorterApp:
         try:
             # Створюємо батьківські теки в цільовій директорії, якщо їх немає.
             os.makedirs(destination_dir, exist_ok=True)
-            # Переміщуємо файл.
-            shutil.move(source_path, destination_path)
-            self.status_label.config(text=f"Переміщено: {os.path.basename(source_path)} до {os.path.basename(destination_base_dir)}")
-            print(f"Переміщено: {source_path} -> {destination_path}")
+            # Переміщуємо або копіюємо файл залежно від обраного режиму.
+            if self.transfer_mode == "copy":
+                shutil.copy2(source_path, destination_path)
+                action = "Скопійовано"
+            else:
+                shutil.move(source_path, destination_path)
+                action = "Переміщено"
+            human_readable_dest = self.destination_labels.get(destination_base_dir, os.path.basename(destination_base_dir))
+            self.status_label.config(text=f"{action}: {os.path.basename(source_path)} до {human_readable_dest}")
+            print(f"{action}: {source_path} -> {destination_path}")
         except Exception as e:
-            # Обробка помилок під час переміщення файлу.
-            self.status_label.config(text=f"Помилка переміщення {os.path.basename(source_path)}: {e}")
-            print(f"Помилка переміщення {source_path}: {e}")
+            # Обробка помилок під час переміщення або копіювання файлу.
+            self.status_label.config(text=f"Помилка обробки {os.path.basename(source_path)}: {e}")
+            print(f"Помилка обробки {source_path}: {e}")
 
 if __name__ == "__main__":
-    # Перевіряємо правильність кількості аргументів командного рядка.
-    if len(sys.argv) != 4:
-        print("Використання: python sort-photos.py <вихідна_тека> <тека_для_Людини1> <тека_для_Людини2>")
-        print("Приклад: python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
-        print("Приклад (Windows): python sort-photos.py C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
+    def print_usage():
+        print("Використання: python sort-photos.py [--mode move|copy] <вихідна_тека> <тека_1> <тека_2> [тека_3 ...]")
+        print("Приклад: python sort-photos.py --mode move /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print("Приклад (багато тек): python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша /home/user/Фото_Родина")
+        print("Приклад (Windows): python sort-photos.py --mode copy C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
+
+    args = sys.argv[1:]
+    mode = "move"
+    positional_args = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--mode"):
+            if arg == "--mode":
+                if i + 1 >= len(args):
+                    print("Помилка: після --mode потрібно вказати 'move' або 'copy'.")
+                    print_usage()
+                    sys.exit(1)
+                mode = args[i + 1].lower()
+                i += 2
+            else:
+                _, _, value = arg.partition("=")
+                if not value:
+                    print("Помилка: використовуйте '--mode copy' або '--mode=copy'.")
+                    print_usage()
+                    sys.exit(1)
+                mode = value.lower()
+                i += 1
+            if mode not in ("move", "copy"):
+                print("Помилка: режим має бути 'move' або 'copy'.")
+                print_usage()
+                sys.exit(1)
+        elif arg in ("-h", "--help"):
+            print_usage()
+            sys.exit(0)
+        else:
+            positional_args.append(arg)
+            i += 1
+
+    if len(positional_args) < 3:
+        print_usage()
         sys.exit(1)
 
     # Отримуємо шляхи з аргументів командного рядка.
-    source_directory = sys.argv[1]
-    person1_directory = sys.argv[2]
-    person2_directory = sys.argv[3]
+    source_directory = positional_args[0]
+    destination_directories = positional_args[1:]
+
+    if len(destination_directories) < 2:
+        print("Помилка: потрібно вказати щонайменше дві цільові теки.")
+        sys.exit(1)
 
     # Перевіряємо, чи існує вихідна директорія.
     if not os.path.exists(source_directory):
@@ -258,6 +341,6 @@ if __name__ == "__main__":
     # Ініціалізуємо головне вікно Tkinter.
     root = Tk()
     # Створюємо екземпляр програми.
-    app = PhotoSorterApp(root, source_directory, person1_directory, person2_directory)
+    app = PhotoSorterApp(root, source_directory, destination_directories, transfer_mode=mode)
     # Запускаємо головний цикл подій Tkinter.
     root.mainloop()
