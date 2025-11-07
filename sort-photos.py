@@ -16,17 +16,18 @@ def _normalize_sort_mode(value):
 
 NATURAL_CHUNK_RE = re.compile(r"(\d+)")
 
+# Спрощені варіанти сортування з короткими ключами
 SORT_MODE_VARIANTS = [
-    ("filenamealphabetical", "Filename alphabetical (A-Z)", {"type": "alpha", "reverse": False}),
-    ("filenamereversealphabetical", "Filename alphabetical (Z-A)", {"type": "alpha", "reverse": True}),
-    ("filenamenaturalsortorder", "Filename natural (A-Z)", {"type": "natural", "reverse": False}),
-    ("filenamenaturalreversesortorder", "Filename natural (Z-A)", {"type": "natural", "reverse": True}),
-    ("creationdatetime", "Created datetime (oldest first)", {"type": "stat", "attribute": "st_ctime", "reverse": False}),
-    ("creationdatetimereverse", "Created datetime (newest first)", {"type": "stat", "attribute": "st_ctime", "reverse": True}),
-    ("changeddatetime", "Modified datetime (oldest first)", {"type": "stat", "attribute": "st_mtime", "reverse": False}),
-    ("changeddatetimereverse", "Modified datetime (newest first)", {"type": "stat", "attribute": "st_mtime", "reverse": True}),
-    ("sizeacc", "File size (smallest first)", {"type": "stat", "attribute": "st_size", "reverse": False}),
-    ("sizedec", "File size (largest first)", {"type": "stat", "attribute": "st_size", "reverse": True}),
+    ("name", "За назвою (А-Я)", {"type": "alpha", "reverse": False}),
+    ("name-rev", "За назвою (Я-А)", {"type": "alpha", "reverse": True}),
+    ("natural", "Натуральне сортування (1,2,10)", {"type": "natural", "reverse": False}),
+    ("natural-rev", "Натуральне сортування (10,2,1)", {"type": "natural", "reverse": True}),
+    ("created", "За датою створення (старі→нові)", {"type": "stat", "attribute": "st_ctime", "reverse": False}),
+    ("created-rev", "За датою створення (нові→старі)", {"type": "stat", "attribute": "st_ctime", "reverse": True}),
+    ("modified", "За датою зміни (старі→нові)", {"type": "stat", "attribute": "st_mtime", "reverse": False}),
+    ("modified-rev", "За датою зміни (нові→старі)", {"type": "stat", "attribute": "st_mtime", "reverse": True}),
+    ("size", "За розміром (менші→більші)", {"type": "stat", "attribute": "st_size", "reverse": False}),
+    ("size-rev", "За розміром (більші→менші)", {"type": "stat", "attribute": "st_size", "reverse": True}),
 ]
 
 SORT_MODE_INFO = {}
@@ -43,7 +44,7 @@ class PhotoSorterApp:
     до однієї з кількох цільових тек, зберігаючи ієрархію.
     Також підтримує вибір режиму сортування списку фотографій.
     """
-    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="filenamealphabetical"):
+    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="name"):
         self.master = master
         self.master.title("Сортувальник Фотографій")
         # Встановлюємо початковий розмір вікна.
@@ -178,7 +179,7 @@ class PhotoSorterApp:
         """
         Сортує список файлів згідно з обраним режимом.
         """
-        config = SORT_MODE_INFO.get(self.sort_mode, SORT_MODE_INFO["filenamealphabetical"])
+        config = SORT_MODE_INFO.get(self.sort_mode, SORT_MODE_INFO["name"])
         reverse = config.get("reverse", False)
         sort_type = config.get("type")
 
@@ -352,17 +353,40 @@ class PhotoSorterApp:
 
 if __name__ == "__main__":
     def print_usage():
-        print("Використання: python sort-photos.py [--mode move|copy] [--sortmode <режим>] <вихідна_тека> <тека_1> <тека_2> [тека_3 ...]")
-        print("Приклад: python sort-photos.py --mode move /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
-        print("Приклад (багато тек): python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша /home/user/Фото_Родина")
-        print("Приклад (Windows): python sort-photos.py --mode copy C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
-        print("Доступні режими сортування (--sortmode, за замовчуванням 'Filename alphabetical (A-Z)'):")
-        for _, label, _ in SORT_MODE_VARIANTS:
-            print(f"  - {label}")
+        print("Використання: python sort-photos.py [--mode move|copy] [--sort <режим>] <вихідна_тека> <тека_1> <тека_2> [тека_3 ...]")
+        print()
+        print("Параметри:")
+        print("  --mode       Режим роботи: 'move' (переміщення) або 'copy' (копіювання)")
+        print("               За замовчуванням: move")
+        print("  --sort       Режим сортування (див. нижче)")
+        print("               За замовчуванням: name")
+        print()
+        print("Доступні режими сортування (--sort):")
+        for key, label, _ in SORT_MODE_VARIANTS:
+            print(f"  {key:15} - {label}")
+        print()
+        print("Приклади:")
+        print("  # Базове використання (переміщення, сортування за назвою)")
+        print("  python sort-photos.py /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print()
+        print("  # Копіювання замість переміщення")
+        print("  python sort-photos.py --mode copy /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print()
+        print("  # Сортування за датою створення (нові спочатку)")
+        print("  python sort-photos.py --sort created-rev /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print()
+        print("  # Натуральне сортування з копіюванням")
+        print("  python sort-photos.py --mode copy --sort natural /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print()
+        print("  # Сортування за розміром (більші спочатку)")
+        print("  python sort-photos.py --sort size-rev /home/user/ВсіФото /home/user/Фото_Вася /home/user/Фото_Маша")
+        print()
+        print("  # Windows приклад")
+        print("  python sort-photos.py --mode copy --sort modified C:\\Photos C:\\Photos_Person1 C:\\Photos_Person2")
 
     args = sys.argv[1:]
     mode = "move"
-    sort_mode_key = "filenamealphabetical"
+    sort_mode_key = "name"
     positional_args = []
     i = 0
     while i < len(args):
@@ -387,10 +411,10 @@ if __name__ == "__main__":
                 print("Помилка: режим має бути 'move' або 'copy'.")
                 print_usage()
                 sys.exit(1)
-        elif arg.startswith("--sortmode"):
-            if arg == "--sortmode":
+        elif arg.startswith("--sort"):
+            if arg == "--sort":
                 if i + 1 >= len(args):
-                    print("Помилка: після --sortmode потрібно вказати один із документованих режимів.")
+                    print("Помилка: після --sort потрібно вказати один із документованих режимів.")
                     print_usage()
                     sys.exit(1)
                 sort_value = args[i + 1]
@@ -398,7 +422,7 @@ if __name__ == "__main__":
             else:
                 _, _, sort_value = arg.partition("=")
                 if not sort_value:
-                    print("Помилка: використовуйте '--sortmode \"Filename alphabetical (A-Z)\"' або '--sortmode=Filename alphabetical (A-Z)'.")
+                    print("Помилка: використовуйте '--sort name' або '--sort=name'.")
                     print_usage()
                     sys.exit(1)
                 i += 1
