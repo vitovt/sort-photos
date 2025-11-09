@@ -4,9 +4,17 @@ import os
 import shutil
 import re
 from tkinter import Tk, Label, PhotoImage
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageDraw
 from collections import deque
 import sys
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
+
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.mpg', '.mpeg', '.flv', '.webm', '.3gp')
 
 
 def _normalize_sort_mode(value):
@@ -42,7 +50,7 @@ class PhotoSorterApp:
     Основний клас програми для сортування фотографій.
     Відображає фотографії та дозволяє користувачу переміщувати або копіювати їх
     до однієї з кількох цільових тек, зберігаючи ієрархію.
-    Також підтримує вибір режиму сортування списку фотографій.
+    Також підтримує вибір режиму сортування списку фотографій та попередній перегляд відео.
     """
     def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="name"):
         self.master = master
@@ -60,6 +68,7 @@ class PhotoSorterApp:
         self.transfer_mode = transfer_mode
         self.sort_mode = sort_mode
         self.sort_mode_label = SORT_MODE_INFO[self.sort_mode]["label"]
+        self.video_preview_enabled = cv2 is not None
 
         destination_dirs = [os.path.abspath(path) for path in destination_dirs]
         if len(destination_dirs) < 2:
@@ -79,6 +88,9 @@ class PhotoSorterApp:
         self.destination_instruction_text = ", ".join(
             [f"'{key}' для {label}" for key, _, label in self.destination_options]
         )
+        self.current_video_capture = None
+        self.current_video_path = None
+        self.video_frame_job = None
 
         # Збираємо всі файли зображень з вихідної директорії та її підтек.
         self.photo_files = self._get_all_image_files()
@@ -120,8 +132,10 @@ class PhotoSorterApp:
             except PermissionError:
                 print("  Помилка доступу до директорії")
 
-        print(f"Знайдено файлів зображень: {len(self.photo_files)}")
+        print(f"Знайдено медіафайлів: {len(self.photo_files)}")
         print(f"Режим сортування: {self.sort_mode_label}")
+        if not self.video_preview_enabled:
+            print("Увага: модуль OpenCV не знайдено, попередній перегляд відео недоступний.")
         if len(self.photo_files) > 0:
             print("Перші 5 знайдених файлів:")
             for i, file in enumerate(list(self.photo_files)[:5]):
@@ -129,14 +143,16 @@ class PhotoSorterApp:
 
     def _get_all_image_files(self):
         """
-        Рекурсивно збирає всі файли зображень з вихідної директорії
+        Рекурсивно збирає всі файли зображень та відео з вихідної директорії
         та її підтек. Підтримувані розширення файлів.
         Після збирання застосовується обраний режим сортування.
         """
-        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
+        image_extensions = IMAGE_EXTENSIONS
+        video_extensions = VIDEO_EXTENSIONS
+        all_extensions = image_extensions + video_extensions
         all_files = deque() # Використовуємо deque для ефективного додавання/видалення
 
-        print(f"Пошук файлів із розширеннями: {image_extensions}")
+        print(f"Пошук файлів із розширеннями: {all_extensions}")
 
         try:
             for root, dirs, files in os.walk(self.source_dir):
@@ -146,7 +162,11 @@ class PhotoSorterApp:
                     if file_lower.endswith(image_extensions):
                         full_path = os.path.join(root, file)
                         all_files.append(full_path)
-                        print(f"  Знайдено: {file}")
+                        print(f"  Знайдено зображення: {file}")
+                    elif file_lower.endswith(video_extensions):
+                        full_path = os.path.join(root, file)
+                        all_files.append(full_path)
+                        print(f"  Знайдено відео: {file}")
                     else:
                         print(f"  Пропущено: {file} (не підтримується)")
         except Exception as e:
@@ -174,6 +194,138 @@ class PhotoSorterApp:
         cleaned = path.rstrip(os.sep)
         base = os.path.basename(cleaned)
         return base if base else cleaned
+
+    def _stop_video_preview(self):
+        """
+        Зупиняє поточний попередній перегляд відео, якщо він активний.
+        """
+        if self.video_frame_job is not None:
+            try:
+                self.master.after_cancel(self.video_frame_job)
+            except Exception:
+                pass
+        self.video_frame_job = None
+
+        if self.current_video_capture is not None:
+            try:
+                self.current_video_capture.release()
+            except Exception:
+                pass
+        self.current_video_capture = None
+        self.current_video_path = None
+
+    def _start_video_preview(self, path, max_img_width, max_img_height):
+        """
+        Ініціалізує та запускає програвання відео у вікні.
+        """
+        if cv2 is None:
+            return False
+
+        try:
+            capture = cv2.VideoCapture(path)
+            if not capture.isOpened():
+                capture.release()
+                raise RuntimeError("Не вдалося відкрити відеофайл.")
+
+            self.current_video_capture = capture
+            self.current_video_path = path
+            self._display_next_video_frame(max_img_width, max_img_height)
+            return True
+        except Exception as exc:
+            print(f"Попередження: неможливо відтворити відео {path}: {exc}")
+            self._stop_video_preview()
+            return False
+
+    def _display_next_video_frame(self, max_img_width, max_img_height):
+        """
+        Зчитує наступний кадр відео та планує показ наступного.
+        """
+        if self.current_video_capture is None:
+            return
+
+        success, frame = self.current_video_capture.read()
+        if not success or frame is None:
+            # Спроба перезапустити відео з початку
+            self.current_video_capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            success, frame = self.current_video_capture.read()
+            if not success or frame is None:
+                self._stop_video_preview()
+                return
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+        img.thumbnail((max_img_width, max_img_height), Image.LANCZOS)
+
+        self.photo = ImageTk.PhotoImage(img)
+        self.image_label.config(image=self.photo, text="")
+        self.image_label.image = self.photo
+
+        fps = self.current_video_capture.get(cv2.CAP_PROP_FPS)
+        delay = 33
+        if fps and fps > 0:
+            delay = max(15, int(1000 / fps))
+
+        if self.current_video_capture is None:
+            return
+        self.video_frame_job = self.master.after(delay, self._display_next_video_frame, max_img_width, max_img_height)
+
+    def _is_video_file(self, path):
+        """
+        Перевіряє, чи належить файл до підтримуваних відеоформатів.
+        """
+        return path.lower().endswith(VIDEO_EXTENSIONS)
+
+    def _load_media_preview(self, path):
+        """
+        Повертає PIL.Image з попереднім переглядом зображення або відео.
+        """
+        lower = path.lower()
+        try:
+            if lower.endswith(IMAGE_EXTENSIONS):
+                with Image.open(path) as img:
+                    return img.copy()
+            if lower.endswith(VIDEO_EXTENSIONS):
+                if not self.video_preview_enabled:
+                    warning = "Встановіть opencv-python для попереднього перегляду."
+                    print(f"Попередження: {warning}")
+                    return self._create_placeholder_image("Відео", warning)
+                return self._extract_video_frame(path)
+            return self._create_placeholder_image("Непідтримуваний формат", os.path.basename(path))
+        except Exception as exc:
+            print(f"Попередження: не вдалося створити попередній перегляд для {path}: {exc}")
+            return self._create_placeholder_image("Помилка попереднього перегляду", str(exc))
+
+    def _extract_video_frame(self, path):
+        """
+        Зчитує перший кадр відео та повертає його як PIL.Image.
+        """
+        if cv2 is None:
+            raise RuntimeError("Модуль OpenCV недоступний.")
+        capture = cv2.VideoCapture(path)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError("Не вдалося відкрити відеофайл.")
+
+        success, frame = capture.read()
+        capture.release()
+        if not success or frame is None:
+            raise RuntimeError("Не вдалося зчитати кадр відео.")
+
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(frame_rgb)
+
+    def _create_placeholder_image(self, title, subtitle=""):
+        """
+        Створює простий заглушковий кадр із текстом.
+        """
+        width, height = 800, 600
+        img = Image.new("RGB", (width, height), color=(45, 45, 45))
+        draw = ImageDraw.Draw(img)
+        message = title if not subtitle else f"{title}\n{subtitle}"
+        text_width, text_height = draw.multiline_textsize(message, spacing=8)
+        position = ((width - text_width) / 2, (height - text_height) / 2)
+        draw.multiline_text(position, message, fill=(255, 255, 255), align="center", spacing=8)
+        return img
 
     def _sort_photo_list(self, files):
         """
@@ -214,12 +366,12 @@ class PhotoSorterApp:
 
     def on_resize(self, event):
         """
-        Обробник події зміни розміру вікна.
-        Перезавантажує поточне фото, щоб воно адаптувалося до нового розміру вікна.
+        Обробник подій зміни розміру вікна.
+        Перезавантажує поточне фото, щоб воно адаптувалось до нового розміру вікна.
         """
         # Перевіряємо, чи це подія зміни розміру вікна, а не інша подія Configure.
         if event.widget == self.master and hasattr(self, 'current_photo_index'):
-            # Перезавантажуємо поточне фото, щоб воно підлаштувалося під новий розмір.
+            # Перезавантажуємо поточне фото, щоб воно підлаштувалось під новий розмір.
             # Зменшуємо індекс на 1, щоб load_next_photo завантажила те ж саме фото.
             if self.current_photo_index >= 0:
                 self.current_photo_index -= 1
@@ -227,24 +379,23 @@ class PhotoSorterApp:
 
     def load_next_photo(self):
         """
-        Завантажує та відображає наступне фото зі списку.
+        Завантажує та відображає наступний медіафайл зі списку.
         Адаптує розмір зображення до розміру вікна.
         """
+        self._stop_video_preview()
         self.current_photo_index += 1
         if self.current_photo_index < len(self.photo_files):
             current_file_path = self.photo_files[self.current_photo_index]
+            media_kind = "Відео" if self._is_video_file(current_file_path) else "Фото"
             instructions = (f"Натисніть {self.destination_instruction_text}, "
                             "'S' для пропуску, 'Q' для виходу.")
             self.status_label.config(
-                text=(f"Файл: {os.path.basename(current_file_path)} "
+                text=(f"{media_kind}: {os.path.basename(current_file_path)} "
                       f"({self.current_photo_index + 1}/{len(self.photo_files)})\n"
                       f"{instructions}")
             )
             try:
-                # Відкриття зображення
-                img = Image.open(current_file_path)
-
-                # Оновлюємо вікно, щоб отримати правильні розміри
+                # Відкриття попереднього перегляду
                 self.master.update_idletasks()
 
                 # Отримуємо поточні розміри вікна для адаптації зображення
@@ -256,20 +407,25 @@ class PhotoSorterApp:
                     window_width = 800
                     window_height = 600
 
-                # Обчислюємо максимальний розмір для зображення, залишаючи місце для статус-бару
+                # Обчислюємо максимальний розмір для попереднього перегляду, залишаючи місце для статус-бару
                 status_height = self.status_label.winfo_reqheight() if self.status_label.winfo_reqheight() > 0 else 60
                 max_img_width = max(100, window_width - 40)  # Відступи, мінімум 100px
                 max_img_height = max(100, window_height - status_height - 40)  # Відступи та висота статус-бару, мінімум 100px
 
-                print(f"Розміри вікна: {window_width}x{window_height}, макс. розмір зображення: {max_img_width}x{max_img_height}")
+                print(f"Розміри вікна: {window_width}x{window_height}, макс. розмір попереднього перегляду: {max_img_width}x{max_img_height}")
 
-                # Змінюємо розмір зображення, зберігаючи пропорції
-                img.thumbnail((max_img_width, max_img_height), Image.LANCZOS)
+                played_video = False
+                if media_kind == "Відео" and self.video_preview_enabled:
+                    played_video = self._start_video_preview(current_file_path, max_img_width, max_img_height)
 
-                self.photo = ImageTk.PhotoImage(img)
-                self.image_label.config(image=self.photo)
-                # Зберігаємо посилання на зображення, щоб уникнути його збирання сміття
-                self.image_label.image = self.photo
+                if not played_video:
+                    img = self._load_media_preview(current_file_path)
+                    img.thumbnail((max_img_width, max_img_height), Image.LANCZOS)
+
+                    self.photo = ImageTk.PhotoImage(img)
+                    self.image_label.config(image=self.photo, text="")
+                    # Зберігаємо посилання на зображення, щоб уникнути його збирання сміття
+                    self.image_label.image = self.photo
 
                 # Фокусуємо вікно для отримання подій клавіатури
                 self.master.focus_force()
@@ -280,14 +436,18 @@ class PhotoSorterApp:
                 # Якщо виникла помилка, пропускаємо поточний файл і завантажуємо наступний.
                 self.load_next_photo()
         else:
-            # Якщо всі фотографії відсортовано або немає фотографій.
+            # Якщо всі медіафайли відсортовано або немає підтримуваних файлів.
             if len(self.photo_files) == 0:
-                self.status_label.config(text="Не знайдено жодного файлу зображення у вказаній директорії!\n"
-                                            "Перевірте шлях та наявність файлів із розширеннями:\n"
-                                            ".png, .jpg, .jpeg, .gif, .bmp, .tiff, .webp")
+                supported_images = ", ".join(IMAGE_EXTENSIONS)
+                supported_videos = ", ".join(VIDEO_EXTENSIONS)
+                self.status_label.config(
+                    text=("Не знайдено жодного медіафайлу у вказаній директорії!\n"
+                          f"Зображення: {supported_images}\n"
+                          f"Відео: {supported_videos}")
+                )
                 self.image_label.config(text="Файли не знайдено", image="")
             else:
-                self.status_label.config(text="Усі фотографії відсортовано! Завершення.")
+                self.status_label.config(text="Усі медіафайли відсортовано! Завершення.")
                 # Закриваємо вікно через 3 секунди.
                 self.master.after(3000, self.master.destroy)
 
@@ -298,7 +458,7 @@ class PhotoSorterApp:
         """
         key = event.char.upper() # Перетворюємо клавішу на верхній регістр для зручності
         if self.current_photo_index >= len(self.photo_files):
-            return # Не обробляти, якщо всі фото відсортовано
+            return # Не обробляти, якщо всі медіафайли відсортовано
 
         current_file_path = self.photo_files[self.current_photo_index]
 
@@ -308,6 +468,7 @@ class PhotoSorterApp:
             self.status_label.config(text=f"Пропущено: {os.path.basename(current_file_path)}")
             self.master.update_idletasks() # Оновлюємо інтерфейс, щоб показати статус
         elif key == 'Q': # Вихід з програми
+            self._stop_video_preview()
             self.master.destroy()
             return
         else:
@@ -321,7 +482,7 @@ class PhotoSorterApp:
 
     def _move_photo(self, source_path, destination_base_dir):
         """
-        Переміщує або копіює фотографію з 'source_path' до 'destination_base_dir',
+        Переміщує або копіює медіафайл з 'source_path' до 'destination_base_dir',
         зберігаючи при цьому відносну ієрархію тек.
         Наприклад, якщо source_dir=/src, source_path=/src/a/b/c.jpg,
         destination_base_dir=/dest, то фото буде переміщено до /dest/a/b/c.jpg.
@@ -364,6 +525,7 @@ if __name__ == "__main__":
         print("Доступні режими сортування (--sort):")
         for key, label, _ in SORT_MODE_VARIANTS:
             print(f"  {key:15} - {label}")
+        print("Підтримуються фото та відео; попередній перегляд відео потребує встановленого OpenCV.")
         print()
         print("Приклади:")
         print("  # Базове використання (переміщення, сортування за назвою)")
