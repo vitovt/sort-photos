@@ -2,6 +2,12 @@
 
 Зручна настільна утиліта, що допомагає швидко переглядати фото/відео та розкидати їх по різних теках. Працює у вікні Tkinter: зліва бачите попередній перегляд, знизу — підказки з гарячими клавішами.
 
+## Screenshots
+
+<img width="400" alt="sort-photos-photo" src="https://github.com/user-attachments/assets/aebffa05-1cac-4930-bf78-689cfbdb2dc5" /> <img width="400" alt="sort-photos-video" src="https://github.com/user-attachments/assets/92acd0b4-6ef2-4367-92e0-c092e5cdb98b" />
+
+
+
 ## Можливості
 
 - Перегляд фото та відео без втрати якості.
