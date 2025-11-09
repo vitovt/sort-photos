@@ -53,7 +53,7 @@ class PhotoSorterApp:
     підтримує різні режими сортування та показує відео з аудіо
     (через VLC, якщо доступний).
     """
-    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="name"):
+    def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="name", filetypes="all"):
         self.master = master
         self.master.title("Сортувальник Фотографій")
         # Встановлюємо початковий розмір вікна.
@@ -69,6 +69,7 @@ class PhotoSorterApp:
         self.transfer_mode = transfer_mode
         self.sort_mode = sort_mode
         self.sort_mode_label = SORT_MODE_INFO[self.sort_mode]["label"]
+        self.filetypes = filetypes
         self.vlc_available = vlc is not None
         self.vlc_instance = vlc.Instance("--quiet") if self.vlc_available else None
         self.vlc_player = None
@@ -156,20 +157,28 @@ class PhotoSorterApp:
         """
         image_extensions = IMAGE_EXTENSIONS
         video_extensions = VIDEO_EXTENSIONS
+        include_photos = self.filetypes in ("all", "photo")
+        include_videos = self.filetypes in ("all", "video")
         all_files = deque() # Використовуємо deque для ефективного додавання/видалення
 
-        print(f"Пошук файлів із розширеннями: {image_extensions + video_extensions}")
+        active_extensions = ()
+        if include_photos:
+            active_extensions += image_extensions
+        if include_videos:
+            active_extensions += video_extensions
+
+        print(f"Пошук файлів із розширеннями: {active_extensions if active_extensions else 'немає (фільтр вимкнув усі типи)'}")
 
         try:
             for root, dirs, files in os.walk(self.source_dir):
                 print(f"Перевіряю теку: {root}")
                 for file in files:
                     file_lower = file.lower()
-                    if file_lower.endswith(image_extensions):
+                    if include_photos and file_lower.endswith(image_extensions):
                         full_path = os.path.join(root, file)
                         all_files.append(full_path)
                         print(f"  Знайдено фото: {file}")
-                    elif file_lower.endswith(video_extensions):
+                    elif include_videos and file_lower.endswith(video_extensions):
                         full_path = os.path.join(root, file)
                         all_files.append(full_path)
                         print(f"  Знайдено відео: {file}")
@@ -591,6 +600,8 @@ if __name__ == "__main__":
         print("               За замовчуванням: move")
         print("  --sort       Режим сортування (див. нижче)")
         print("               За замовчуванням: name")
+        print("  --filetypes  Які типи медіа брати: 'photo', 'video' або 'all'")
+        print("               За замовчуванням: all")
         print()
         print("Доступні режими сортування (--sort):")
         for key, label, _ in SORT_MODE_VARIANTS:
@@ -620,6 +631,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     mode = "move"
     sort_mode_key = "name"
+    filetype_filter = "all"
     positional_args = []
     i = 0
     while i < len(args):
@@ -665,6 +677,27 @@ if __name__ == "__main__":
                 print_usage()
                 sys.exit(1)
             sort_mode_key = SORT_MODE_LOOKUP[normalized]
+        elif arg.startswith("--filetypes"):
+            if arg == "--filetypes":
+                if i + 1 >= len(args):
+                    print("Помилка: після --filetypes потрібно вказати 'photo', 'video' або 'all'.")
+                    print_usage()
+                    sys.exit(1)
+                filetypes_value = args[i + 1]
+                i += 2
+            else:
+                _, _, filetypes_value = arg.partition("=")
+                if not filetypes_value:
+                    print("Помилка: використовуйте '--filetypes photo' або '--filetypes=photo'.")
+                    print_usage()
+                    sys.exit(1)
+                i += 1
+            normalized_ft = filetypes_value.lower()
+            if normalized_ft not in ("photo", "video", "all"):
+                print("Помилка: --filetypes підтримує лише значення 'photo', 'video' або 'all'.")
+                print_usage()
+                sys.exit(1)
+            filetype_filter = normalized_ft
         elif arg in ("-h", "--help"):
             print_usage()
             sys.exit(0)
@@ -696,6 +729,6 @@ if __name__ == "__main__":
     # Ініціалізуємо головне вікно Tkinter.
     root = Tk()
     # Створюємо екземпляр програми.
-    app = PhotoSorterApp(root, source_directory, destination_directories, transfer_mode=mode, sort_mode=sort_mode_key)
+    app = PhotoSorterApp(root, source_directory, destination_directories, transfer_mode=mode, sort_mode=sort_mode_key, filetypes=filetype_filter)
     # Запускаємо головний цикл подій Tkinter.
     root.mainloop()
