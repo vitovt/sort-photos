@@ -3,10 +3,19 @@
 import os
 import shutil
 import re
-from tkinter import Tk, Label, PhotoImage
-from PIL import Image, ImageTk
-from collections import deque
 import sys
+from tkinter import Tk, Label
+from PIL import Image, ImageTk, ImageDraw
+from collections import deque
+
+try:
+    import vlc
+except ImportError:
+    vlc = None
+
+IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.wmv', '.mpg', '.mpeg', '.flv', '.webm', '.3gp')
+VIDEO_SCRUB_STEP_MS = 5000
 
 
 def _normalize_sort_mode(value):
@@ -39,10 +48,10 @@ for key, label, config in SORT_MODE_VARIANTS:
 
 class PhotoSorterApp:
     """
-    Основний клас програми для сортування фотографій.
-    Відображає фотографії та дозволяє користувачу переміщувати або копіювати їх
-    до однієї з кількох цільових тек, зберігаючи ієрархію.
-    Також підтримує вибір режиму сортування списку фотографій.
+    Основний клас програми для сортування медіафайлів.
+    Дозволяє переміщувати або копіювати фото та відео до кількох тек,
+    підтримує різні режими сортування та показує відео з аудіо
+    (через VLC, якщо доступний).
     """
     def __init__(self, master, source_dir, destination_dirs, transfer_mode="move", sort_mode="name"):
         self.master = master
@@ -60,6 +69,16 @@ class PhotoSorterApp:
         self.transfer_mode = transfer_mode
         self.sort_mode = sort_mode
         self.sort_mode_label = SORT_MODE_INFO[self.sort_mode]["label"]
+        self.vlc_available = vlc is not None
+        self.vlc_instance = vlc.Instance("--quiet") if self.vlc_available else None
+        self.vlc_player = None
+        self.video_status_job = None
+        self.current_media_type = None
+        self.current_media_path = None
+        self.current_status_header = ""
+        self.current_instruction_text = ""
+        self.video_duration_ms = 0
+        self.video_paused = False
 
         destination_dirs = [os.path.abspath(path) for path in destination_dirs]
         if len(destination_dirs) < 2:
@@ -80,10 +99,10 @@ class PhotoSorterApp:
             [f"'{key}' для {label}" for key, _, label in self.destination_options]
         )
 
-        # Збираємо всі файли зображень з вихідної директорії та її підтек.
-        self.photo_files = self._get_all_image_files()
+        # Збираємо всі файли з вихідної директорії та її підтек.
+        self.photo_files = self._get_all_media_files()
         # Список впорядковується згідно з параметром sort_mode.
-        self.current_photo_index = -1 # Індекс поточного фото, починаємо з -1, щоб перший виклик load_next_photo зробив його 0.
+        self.current_photo_index = -1 # Індекс поточного об'єкта, load_next_photo зробить його 0.
 
         # Створюємо мітку для відображення зображення.
         # expand=True та fill="both" дозволяють мітці займати весь доступний простір.
@@ -120,23 +139,26 @@ class PhotoSorterApp:
             except PermissionError:
                 print("  Помилка доступу до директорії")
 
-        print(f"Знайдено файлів зображень: {len(self.photo_files)}")
+        print(f"Знайдено підтримуваних медіафайлів: {len(self.photo_files)}")
         print(f"Режим сортування: {self.sort_mode_label}")
+        if not self.vlc_available:
+            print("Увага: python-vlc не знайдено — відео відображатиметься без відтворення.")
         if len(self.photo_files) > 0:
             print("Перші 5 знайдених файлів:")
             for i, file in enumerate(list(self.photo_files)[:5]):
                 print(f"  {i+1}. {file}")
 
-    def _get_all_image_files(self):
+    def _get_all_media_files(self):
         """
-        Рекурсивно збирає всі файли зображень з вихідної директорії
-        та її підтек. Підтримувані розширення файлів.
+        Рекурсивно збирає всі підтримувані фото та відео з вихідної директорії,
+        включно з підтек, та повертає відсортований список.
         Після збирання застосовується обраний режим сортування.
         """
-        image_extensions = ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp')
+        image_extensions = IMAGE_EXTENSIONS
+        video_extensions = VIDEO_EXTENSIONS
         all_files = deque() # Використовуємо deque для ефективного додавання/видалення
 
-        print(f"Пошук файлів із розширеннями: {image_extensions}")
+        print(f"Пошук файлів із розширеннями: {image_extensions + video_extensions}")
 
         try:
             for root, dirs, files in os.walk(self.source_dir):
@@ -146,7 +168,11 @@ class PhotoSorterApp:
                     if file_lower.endswith(image_extensions):
                         full_path = os.path.join(root, file)
                         all_files.append(full_path)
-                        print(f"  Знайдено: {file}")
+                        print(f"  Знайдено фото: {file}")
+                    elif file_lower.endswith(video_extensions):
+                        full_path = os.path.join(root, file)
+                        all_files.append(full_path)
+                        print(f"  Знайдено відео: {file}")
                     else:
                         print(f"  Пропущено: {file} (не підтримується)")
         except Exception as e:
@@ -174,6 +200,175 @@ class PhotoSorterApp:
         cleaned = path.rstrip(os.sep)
         base = os.path.basename(cleaned)
         return base if base else cleaned
+
+    def _is_supported_image(self, path):
+        return path.lower().endswith(IMAGE_EXTENSIONS)
+
+    def _is_supported_video(self, path):
+        return path.lower().endswith(VIDEO_EXTENSIONS)
+
+    def _create_placeholder_image(self, title, subtitle=""):
+        """
+        Створює простий заглушковий кадр із текстом.
+        """
+        width, height = 800, 600
+        img = Image.new("RGB", (width, height), color=(45, 45, 45))
+        draw = ImageDraw.Draw(img)
+        message = title if not subtitle else f"{title}\n{subtitle}"
+        tw, th = draw.multiline_textsize(message, spacing=8)
+        draw.multiline_text(
+            ((width - tw) / 2, (height - th) / 2),
+            message,
+            fill=(255, 255, 255),
+            align="center",
+            spacing=8,
+        )
+        return img
+
+    def _load_image_preview(self, path):
+        """
+        Повертає копію зображення або заглушку у випадку помилки.
+        """
+        try:
+            with Image.open(path) as img:
+                return img.copy()
+        except Exception as exc:
+            print(f"Не вдалося завантажити {path}: {exc}")
+            return self._create_placeholder_image("Помилка зображення", os.path.basename(path))
+
+    def _show_pil_image(self, pil_image, max_width, max_height):
+        """
+        Масштабує та показує PIL.Image у віджеті.
+        """
+        img = pil_image.copy()
+        img.thumbnail((max_width, max_height), Image.LANCZOS)
+        self.photo = ImageTk.PhotoImage(img)
+        self.image_label.config(image=self.photo, text="")
+        self.image_label.image = self.photo
+
+    def _build_instruction_text(self, media_kind):
+        base = f"Натисніть {self.destination_instruction_text}, 'S' для пропуску, 'Q' для виходу."
+        if media_kind == "Відео":
+            base += " Пробіл — пауза/продовжити, \u2190/\u2192 — перемотка 5с."
+        return base
+
+    def _set_status_text(self, header, extra_line=""):
+        """
+        Оновлює текст статусу з урахуванням основного повідомлення та інструкцій.
+        """
+        parts = [header]
+        if extra_line:
+            parts.append(extra_line)
+        parts.append(self.current_instruction_text)
+        self.status_label.config(text="\n".join(parts))
+
+    def _format_timestamp(self, millis):
+        if millis <= 0:
+            return "00:00"
+        seconds = millis // 1000
+        minutes, sec = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02}:{minutes:02}:{sec:02}"
+        return f"{minutes:02}:{sec:02}"
+
+    def _ensure_vlc_player(self):
+        if not self.vlc_available:
+            return None
+        if self.vlc_instance is None:
+            self.vlc_instance = vlc.Instance("--quiet")
+        self._stop_video_playback()
+        return self.vlc_instance.media_player_new()
+
+    def _attach_player_to_widget(self, player):
+        widget_id = self.image_label.winfo_id()
+        if sys.platform.startswith("linux"):
+            player.set_xwindow(widget_id)
+        elif sys.platform == "win32":
+            player.set_hwnd(widget_id)
+        elif sys.platform == "darwin":
+            player.set_nsobject(widget_id)
+
+    def _play_video(self, path):
+        """
+        Запускає відео у віджеті. Повертає True, якщо відтворення стартувало.
+        """
+        if not self.vlc_available:
+            return False
+
+        player = self._ensure_vlc_player()
+        if player is None:
+            return False
+
+        media = self.vlc_instance.media_new(path)
+        player.set_media(media)
+        self.master.update_idletasks()
+        self._attach_player_to_widget(player)
+        result = player.play()
+        if result == -1:
+            self._stop_video_playback()
+            return False
+
+        self.vlc_player = player
+        self.video_paused = False
+        self.video_duration_ms = 0
+        self._schedule_video_status_update()
+        return True
+
+    def _schedule_video_status_update(self):
+        if self.video_status_job is not None:
+            self.master.after_cancel(self.video_status_job)
+        self.video_status_job = self.master.after(500, self._update_video_status)
+
+    def _update_video_status(self):
+        if not self.vlc_player:
+            return
+        current = self.vlc_player.get_time()
+        total = self.vlc_player.get_length()
+        if total and total > 0:
+            self.video_duration_ms = total
+        total = self.video_duration_ms
+        progress = f"{self._format_timestamp(current)} / {self._format_timestamp(total)}" if total else ""
+        header = self.current_status_header
+        self._set_status_text(header, progress)
+        self._schedule_video_status_update()
+
+    def _stop_video_playback(self):
+        if self.video_status_job is not None:
+            try:
+                self.master.after_cancel(self.video_status_job)
+            except Exception:
+                pass
+        self.video_status_job = None
+        if self.vlc_player is not None:
+            try:
+                self.vlc_player.stop()
+            except Exception:
+                pass
+        self.vlc_player = None
+        self.video_duration_ms = 0
+        self.video_paused = False
+
+    def _vlc_ready(self):
+        return self.vlc_player is not None
+
+    def _seek_video(self, delta_ms):
+        if not self._vlc_ready():
+            return
+        current = self.vlc_player.get_time()
+        length = self.vlc_player.get_length()
+        target = current + delta_ms
+        if length and length > 0:
+            target = max(0, min(target, length))
+        else:
+            target = max(0, target)
+        self.vlc_player.set_time(int(target))
+
+    def _toggle_video_pause(self):
+        if not self._vlc_ready():
+            return
+        self.vlc_player.pause()
+        self.video_paused = not self.video_paused
 
     def _sort_photo_list(self, files):
         """
@@ -227,67 +422,67 @@ class PhotoSorterApp:
 
     def load_next_photo(self):
         """
-        Завантажує та відображає наступне фото зі списку.
-        Адаптує розмір зображення до розміру вікна.
+        Завантажує та відображає наступний медіафайл зі списку.
+        Адаптує попередній перегляд до розміру вікна.
         """
+        self._stop_video_playback()
         self.current_photo_index += 1
         if self.current_photo_index < len(self.photo_files):
             current_file_path = self.photo_files[self.current_photo_index]
-            instructions = (f"Натисніть {self.destination_instruction_text}, "
-                            "'S' для пропуску, 'Q' для виходу.")
-            self.status_label.config(
-                text=(f"Файл: {os.path.basename(current_file_path)} "
-                      f"({self.current_photo_index + 1}/{len(self.photo_files)})\n"
-                      f"{instructions}")
+            media_kind = "Відео" if self._is_supported_video(current_file_path) else "Фото"
+            self.current_media_type = media_kind
+            self.current_media_path = current_file_path
+            self.current_instruction_text = self._build_instruction_text(media_kind)
+            self.current_status_header = (
+                f"{media_kind}: {os.path.basename(current_file_path)} "
+                f"({self.current_photo_index + 1}/{len(self.photo_files)})"
             )
+            self._set_status_text(self.current_status_header, "" if media_kind == "Фото" else "Завантаження...")
             try:
-                # Відкриття зображення
-                img = Image.open(current_file_path)
-
-                # Оновлюємо вікно, щоб отримати правильні розміри
                 self.master.update_idletasks()
-
-                # Отримуємо поточні розміри вікна для адаптації зображення
                 window_width = self.master.winfo_width()
                 window_height = self.master.winfo_height()
-
-                # Якщо вікно ще не ініціалізовано, використовуємо значення за замовчуванням
                 if window_width <= 1 or window_height <= 1:
                     window_width = 800
                     window_height = 600
-
-                # Обчислюємо максимальний розмір для зображення, залишаючи місце для статус-бару
                 status_height = self.status_label.winfo_reqheight() if self.status_label.winfo_reqheight() > 0 else 60
                 max_img_width = max(100, window_width - 40)  # Відступи, мінімум 100px
                 max_img_height = max(100, window_height - status_height - 40)  # Відступи та висота статус-бару, мінімум 100px
+                print(f"Розміри вікна: {window_width}x{window_height}, макс. розмір попереднього перегляду: {max_img_width}x{max_img_height}")
 
-                print(f"Розміри вікна: {window_width}x{window_height}, макс. розмір зображення: {max_img_width}x{max_img_height}")
+                if media_kind == "Відео" and self.vlc_available:
+                    self.image_label.config(image="", text="Завантаження відео...")
+                    started = self._play_video(current_file_path)
+                    if not started:
+                        placeholder = self._create_placeholder_image("Не вдалося відтворити відео", os.path.basename(current_file_path))
+                        self._show_pil_image(placeholder, max_img_width, max_img_height)
+                        self._set_status_text(self.current_status_header, "Помилка відтворення")
+                else:
+                    if media_kind == "Відео" and not self.vlc_available:
+                        img = self._create_placeholder_image("Встановіть python-vlc", os.path.basename(current_file_path))
+                    else:
+                        img = self._load_image_preview(current_file_path)
+                    self._show_pil_image(img, max_img_width, max_img_height)
+                    self._set_status_text(self.current_status_header)
 
-                # Змінюємо розмір зображення, зберігаючи пропорції
-                img.thumbnail((max_img_width, max_img_height), Image.LANCZOS)
-
-                self.photo = ImageTk.PhotoImage(img)
-                self.image_label.config(image=self.photo)
-                # Зберігаємо посилання на зображення, щоб уникнути його збирання сміття
-                self.image_label.image = self.photo
-
-                # Фокусуємо вікно для отримання подій клавіатури
                 self.master.focus_force()
-
             except Exception as e:
                 self.status_label.config(text=f"Помилка завантаження {os.path.basename(current_file_path)}: {e}\nПропускаю...")
                 print(f"Помилка завантаження {current_file_path}: {e}")
-                # Якщо виникла помилка, пропускаємо поточний файл і завантажуємо наступний.
                 self.load_next_photo()
         else:
             # Якщо всі фотографії відсортовано або немає фотографій.
             if len(self.photo_files) == 0:
-                self.status_label.config(text="Не знайдено жодного файлу зображення у вказаній директорії!\n"
-                                            "Перевірте шлях та наявність файлів із розширеннями:\n"
-                                            ".png, .jpg, .jpeg, .gif, .bmp, .tiff, .webp")
+                supported_images = ", ".join(IMAGE_EXTENSIONS)
+                supported_videos = ", ".join(VIDEO_EXTENSIONS)
+                self.status_label.config(
+                    text=("Не знайдено жодного підтримуваного медіафайлу у вказаній директорії!\n"
+                          f"Зображення: {supported_images}\n"
+                          f"Відео: {supported_videos}")
+                )
                 self.image_label.config(text="Файли не знайдено", image="")
             else:
-                self.status_label.config(text="Усі фотографії відсортовано! Завершення.")
+                self.status_label.config(text="Усі медіафайли відсортовано! Завершення.")
                 # Закриваємо вікно через 3 секунди.
                 self.master.after(3000, self.master.destroy)
 
@@ -296,19 +491,34 @@ class PhotoSorterApp:
         Обробник натискання клавіш.
         Визначає дію залежно від натиснутої клавіші.
         """
-        key = event.char.upper() # Перетворюємо клавішу на верхній регістр для зручності
+        key = event.char.upper() if event.char else ""
+        keysym = event.keysym.upper()
         if self.current_photo_index >= len(self.photo_files):
-            return # Не обробляти, якщо всі фото відсортовано
+            return # Не обробляти, якщо всі медіафайли відсортовано
 
         current_file_path = self.photo_files[self.current_photo_index]
+        is_video = self.current_media_type == "Відео"
 
         if key in self.key_to_destination:
             self._move_photo(current_file_path, self.key_to_destination[key])
         elif key == 'S': # Пропустити фотографію
+            self._stop_video_playback()
             self.status_label.config(text=f"Пропущено: {os.path.basename(current_file_path)}")
             self.master.update_idletasks() # Оновлюємо інтерфейс, щоб показати статус
+            self.load_next_photo()
+            return
         elif key == 'Q': # Вихід з програми
+            self._stop_video_playback()
             self.master.destroy()
+            return
+        elif keysym == "SPACE" and is_video:
+            self._toggle_video_pause()
+            return
+        elif keysym == "LEFT" and is_video:
+            self._seek_video(-VIDEO_SCRUB_STEP_MS)
+            return
+        elif keysym == "RIGHT" and is_video:
+            self._seek_video(VIDEO_SCRUB_STEP_MS)
             return
         else:
             self.status_label.config(
@@ -321,10 +531,10 @@ class PhotoSorterApp:
 
     def _move_photo(self, source_path, destination_base_dir):
         """
-        Переміщує або копіює фотографію з 'source_path' до 'destination_base_dir',
+        Переміщує або копіює медіафайл з 'source_path' до 'destination_base_dir',
         зберігаючи при цьому відносну ієрархію тек.
         Наприклад, якщо source_dir=/src, source_path=/src/a/b/c.jpg,
-        destination_base_dir=/dest, то фото буде переміщено до /dest/a/b/c.jpg.
+        destination_base_dir=/dest, то файл буде переміщено до /dest/a/b/c.jpg.
         """
         # Обчислюємо відносний шлях файлу відносно вихідної директорії.
         relative_path = os.path.relpath(source_path, self.source_dir)
@@ -364,6 +574,8 @@ if __name__ == "__main__":
         print("Доступні режими сортування (--sort):")
         for key, label, _ in SORT_MODE_VARIANTS:
             print(f"  {key:15} - {label}")
+        print("Підтримуються фото та відео. Для відтворення відео з аудіо необхідно встановити VLC / python-vlc.")
+        print("Під час перегляду відео використовуйте пробіл для паузи, \u2190/\u2192 для перемотки (5с).")
         print()
         print("Приклади:")
         print("  # Базове використання (переміщення, сортування за назвою)")
