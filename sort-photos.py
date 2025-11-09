@@ -355,14 +355,35 @@ class PhotoSorterApp:
     def _seek_video(self, delta_ms):
         if not self._vlc_ready():
             return
-        current = self.vlc_player.get_time()
-        length = self.vlc_player.get_length()
+        player = self.vlc_player
+        current = player.get_time()
+        length = player.get_length()
         target = current + delta_ms
         if length and length > 0:
             target = max(0, min(target, length))
         else:
             target = max(0, target)
-        self.vlc_player.set_time(int(target))
+
+        def apply_seek():
+            if not self._vlc_ready():
+                return
+            self.vlc_player.set_time(int(target))
+            if self.video_paused:
+                self.vlc_player.set_pause(1)
+
+        state = player.get_state()
+        restart_needed = (
+            length and target < length and state in (vlc.State.Ended, vlc.State.Stopped)
+        )
+
+        if restart_needed:
+            player.stop()
+            result = player.play()
+            self.video_paused = False
+            delay = 150 if result == 0 else 0
+            self.master.after(delay, apply_seek)
+        else:
+            apply_seek()
 
     def _toggle_video_pause(self):
         if not self._vlc_ready():
