@@ -463,8 +463,9 @@ class PhotoSorterApp:
             self.current_media_type = media_kind
             self.current_media_path = current_file_path
             self.current_instruction_text = self._build_instruction_text(media_kind)
+            relative_path = os.path.relpath(current_file_path, self.source_dir)
             self.current_status_header = (
-                f"{media_kind}: {os.path.basename(current_file_path)} "
+                f"{media_kind}: {relative_path} "
                 f"({self.current_photo_index + 1}/{len(self.photo_files)})"
             )
             self._set_status_text(self.current_status_header, "" if media_kind == "Фото" else "Завантаження...")
