@@ -400,9 +400,9 @@ class PhotoSorterApp:
         self.vlc_player.pause()
         self.video_paused = not self.video_paused
 
-    def _sort_photo_list(self, files):
+    def _get_sort_key(self):
         """
-        Сортує список файлів згідно з обраним режимом.
+        Повертає функцію ключа сортування та напрям (reverse) згідно поточного режиму.
         """
         config = SORT_MODE_INFO.get(self.sort_mode, SORT_MODE_INFO["name"])
         reverse = config.get("reverse", False)
@@ -418,8 +418,30 @@ class PhotoSorterApp:
         else:
             key_func = lambda path: os.path.basename(path).lower()
 
-        sorted_files = sorted(files, key=key_func, reverse=reverse)
-        return sorted_files
+        return key_func, reverse
+
+    def _sort_photo_list(self, files):
+        """
+        Групує файли за відносним шляхом теки та сортує кожну групу окремо.
+        """
+        if not files:
+            return []
+
+        key_func, reverse = self._get_sort_key()
+        groups = {}
+        for path in files:
+            rel_dir = os.path.dirname(os.path.relpath(path, self.source_dir))
+            groups.setdefault(rel_dir, []).append(path)
+
+        def group_key(dir_path):
+            normalized = "" if dir_path in ("", ".") else dir_path
+            return (0 if normalized == "" else 1, normalized.lower())
+
+        ordered = []
+        for directory in sorted(groups.keys(), key=group_key):
+            ordered.extend(sorted(groups[directory], key=key_func, reverse=reverse))
+
+        return ordered
 
     def _natural_key(self, text):
         """
